@@ -3,11 +3,11 @@ import re
 import json
 import secrets
 from functools import wraps
+from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify, render_template, render_template_string, request
 from flask_cors import CORS
-from googlesearch import search
 
 app = Flask(__name__)
 CORS(app)  # Allow any external website (e.g., GitHub Pages) to call this API
@@ -18,7 +18,8 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/131.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "application/json, text/html, application/xml;q=0.9, */*;q=0.8"
 }
 
 
@@ -161,110 +162,198 @@ def generate_key():
     })
 
 
-# 3. Live Cricket Scores Endpoint (Includes Runs, Wickets, Overs & Status)
+# 3. Live Cricket Scores Endpoint (ESPNcricinfo Official RSS + Scoreboard API)
 @app.route("/live", methods=["GET"])
 @require_api_key
 def get_live():
+    matches = []
+    seen_titles = set()
+
+    # Source A: ESPNcricinfo Official Live Scores XML/RSS Feed (reliable, includes wickets & overs)
     try:
-        url = "https://www.cricbuzz.com/cricket-match/live-scores"
-        resp = requests.get(url, headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(resp.text, "html.parser")
+        rss_resp = requests.get("https://static.cricinfo.com/rss/livescores.xml", headers=HEADERS, timeout=10)
+        if rss_resp.ok:
+            soup = BeautifulSoup(rss_resp.text, "html.parser")
+            for item in soup.find_all("item"):
+                title_tag = item.find("title")
+                desc_tag = item.find("description")
+                link_tag = item.find("guid") or item.find("link")
 
-        matches = []
-        match_blocks = soup.find_all("div", class_=re.compile(r"cb-mtch-lst|cb-schdl"))
-        for block in match_blocks:
-            title_el = block.find(["h3", "a"], class_=re.compile(r"cb-lv-scr-mtch-hdr|text-hvr-underline"))
-            score_el = block.find("div", class_=re.compile(r"cb-scr-wll-chvrn|cb-lv-scrs-col"))
-            status_el = block.find("div", class_=re.compile(r"cb-text-live|cb-text-complete|cb-text-preview"))
+                raw_title = title_tag.get_text(" ", strip=True) if title_tag else ""
+                desc = desc_tag.get_text(" ", strip=True) if desc_tag else ""
+                link = link_tag.get_text(" ", strip=True) if link_tag else ""
 
-            title = title_el.get_text(" ", strip=True) if title_el else ""
-            score_text = score_el.get_text(" | ", strip=True) if score_el else ""
-            status_text = status_el.get_text(" ", strip=True) if status_el else ""
+                if raw_title and raw_title not in seen_titles:
+                    seen_titles.add(raw_title)
+                    parts = [p.strip() for p in raw_title.split(" v ")]
+                    team1 = parts[0] if len(parts) > 0 else raw_title
+                    team2 = parts[1] if len(parts) > 1 else ""
+                    matches.append({
+                        "title": raw_title,
+                        "match": raw_title,
+                        "teams": [team1, team2] if team2 else [team1],
+                        "score": raw_title,
+                        "status": desc or "Live / Recent",
+                        "series": "ESPNcricinfo Live",
+                        "url": link,
+                        "summary": raw_title
+                    })
+    except Exception:
+        pass
 
-            if title or score_text:
-                matches.append({
-                    "match": title,
-                    "score": score_text,
-                    "status": status_text,
-                    "summary": " - ".join(p for p in [title, score_text, status_text] if p)
-                })
+    # Source B: ESPN Public Cricket Scoreboard JSON API (adds series name, venue, overs & detailed status)
+    try:
+        sb_resp = requests.get("https://site.api.espn.com/apis/site/v2/sports/cricket/scorepanel", headers=HEADERS, timeout=10)
+        if sb_resp.ok:
+            sb_data = sb_resp.json()
+            for group in sb_data.get("scores", []):
+                league_name = group.get("leagues", [{}])[0].get("name", "Cricket")
+                for ev in group.get("events", []):
+                    name = ev.get("name", "")
+                    short_name = ev.get("shortName", name)
+                    status_detail = ev.get("status", {}).get("type", {}).get("detail", "")
+                    comp = (ev.get("competitions") or [{}])[0]
+                    competitors = comp.get("competitors", [])
 
-        return jsonify(matches)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+                    team_scores = []
+                    team_names = []
+                    for c in competitors:
+                        t_name = c.get("team", {}).get("displayName", "")
+                        t_score = c.get("score", "")
+                        team_names.append(t_name)
+                        team_scores.append(f"{t_name} {t_score}".strip())
+
+                    score_line = " vs ".join(team_scores) if team_scores else name
+                    if score_line and score_line not in seen_titles:
+                        seen_titles.add(score_line)
+                        matches.append({
+                            "title": name or short_name,
+                            "match": name or short_name,
+                            "teams": team_names,
+                            "score": score_line,
+                            "status": status_detail or "Live",
+                            "series": league_name,
+                            "summary": f"{score_line} — {status_detail} ({league_name})"
+                        })
+    except Exception:
+        pass
+
+    return jsonify(matches[:25])
 
 
-# 4. Upcoming Schedule Endpoint
+# 4. Upcoming Schedule Endpoint (ESPN Public Cricket Scoreboard Calendar)
 @app.route("/schedule", methods=["GET"])
 @require_api_key
 def get_schedule():
+    fixtures = []
+    seen = set()
+
     try:
-        url = "https://www.cricbuzz.com/cricket-schedule/upcoming-series/international"
-        resp = requests.get(url, headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(resp.text, "html.parser")
+        sb_resp = requests.get("https://site.api.espn.com/apis/site/v2/sports/cricket/scorepanel", headers=HEADERS, timeout=10)
+        if sb_resp.ok:
+            sb_data = sb_resp.json()
+            for group in sb_data.get("scores", []):
+                league_name = group.get("leagues", [{}])[0].get("name", "International / Domestic")
+                for ev in group.get("events", []):
+                    state = ev.get("status", {}).get("type", {}).get("state", "")
+                    name = ev.get("name", "")
+                    date_str = ev.get("date", "")
+                    comp = (ev.get("competitions") or [{}])[0]
+                    venue = comp.get("venue", {}).get("fullName", "")
+                    status_detail = ev.get("status", {}).get("type", {}).get("detail", date_str)
 
-        fixtures = []
-        rows = soup.find_all("div", class_=re.compile(r"cb-ovr-flo|cb-col-100"))
-        seen = set()
-        for row in rows:
-            link = row.find("a", href=re.compile(r"/live-cricket-scores/|/cricket-series/"))
-            if not link:
-                continue
-            text = row.get_text(" ", strip=True)
-            if text and 10 < len(text) < 220 and text not in seen:
-                seen.add(text)
-                fixtures.append(text)
-            if len(fixtures) >= 25:
-                break
+                    if name and name not in seen:
+                        # Prioritize upcoming ("pre") or include active schedule
+                        if state == "pre" or len(fixtures) < 15:
+                            seen.add(name)
+                            fixtures.append({
+                                "match": name,
+                                "title": name,
+                                "series": league_name,
+                                "date": status_detail or date_str,
+                                "venue": venue or "TBA",
+                                "summary": f"{name} ({league_name}) — {status_detail}"
+                            })
+    except Exception:
+        pass
 
-        return jsonify(fixtures)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify(fixtures[:25])
 
 
-# 5. Player Profile & Career Stats Endpoint
+# 5. Player Search & Player Comparison Endpoint (Unblocked ESPN Athlete Search + Profile Stats)
 @app.route("/players/<player_name>", methods=["GET"])
 @require_api_key
 def get_player(player_name):
-    query = f"{player_name} cricbuzz profile"
-    profile_link = None
+    clean_query = player_name.strip()
+    if not clean_query:
+        return jsonify({"error": "Player name is required"}), 400
+
+    # Step 1: Search ESPN Public Athlete Directory (never blocked on Render)
     try:
-        results = search(query, num_results=5)
-        for link in results:
-            if "cricbuzz.com/profiles/" in link:
-                profile_link = link
+        search_url = f"https://site.web.api.espn.com/apis/common/v3/search?query={quote(clean_query)}&limit=5&type=player"
+        s_resp = requests.get(search_url, headers=HEADERS, timeout=10)
+        items = s_resp.json().get("items", []) if s_resp.ok else []
+
+        cricket_player = None
+        for item in items:
+            if item.get("sport", "").lower() == "cricket":
+                cricket_player = item
                 break
-        if not profile_link:
-            return jsonify({"error": f"No Cricbuzz profile found for {player_name}"}), 404
-    except Exception as e:
-        return jsonify({"error": f"Search failed: {str(e)}"}), 500
+        if not cricket_player and items:
+            cricket_player = items[0]
 
-    try:
-        resp = requests.get(profile_link, headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(resp.text, "html.parser")
+        if not cricket_player:
+            return jsonify({"error": f"Player not found: {clean_query}"}), 404
 
-        name_el = soup.find("h1")
-        name = name_el.get_text(strip=True) if name_el else player_name
+        athlete_id = cricket_player.get("id")
+        full_name = cricket_player.get("displayName") or clean_query.title()
+        team_name = cricket_player.get("team", {}).get("displayName", "International")
 
-        tables = soup.find_all("table")
-        stats_tables = []
-        for tbl in tables[:2]:
-            headers = [th.get_text(strip=True) for th in tbl.find_all("th")]
-            rows_data = []
-            for tr in tbl.find_all("tr")[1:]:
-                cells = [td.get_text(strip=True) for td in tr.find_all("td")]
-                if cells:
-                    rows_data.append(dict(zip(headers, cells)) if headers else cells)
-            if rows_data:
-                stats_tables.append(rows_data)
+        # Step 2: Fetch detailed athlete bio & stats from ESPN Cricket Core API
+        bio_url = f"https://site.web.api.espn.com/apis/common/v3/sports/cricket/athletes/{athlete_id}"
+        b_resp = requests.get(bio_url, headers=HEADERS, timeout=10)
+        athlete_data = b_resp.json().get("athlete", {}) if b_resp.ok else {}
+
+        position = athlete_data.get("position", {}).get("displayName", "Cricketer")
+        bat_style = athlete_data.get("bats", {}).get("description", "N/A") if isinstance(athlete_data.get("bats"), dict) else str(athlete_data.get("bats", "N/A"))
+        bowl_style = athlete_data.get("bowls", {}).get("description", "N/A") if isinstance(athlete_data.get("bowls"), dict) else str(athlete_data.get("bowls", "N/A"))
+        age = athlete_data.get("displayAge", "N/A")
+        dob = athlete_data.get("displayDOB", "N/A")
+        image_url = athlete_data.get("headshot", {}).get("href", "")
+
+        # Fetch career statistics summary
+        stats_url = f"https://site.web.api.espn.com/apis/common/v3/sports/cricket/athletes/{athlete_id}/stats"
+        st_resp = requests.get(stats_url, headers=HEADERS, timeout=10)
+        stats_json = st_resp.json() if st_resp.ok else {}
+
+        formatted_stats = {}
+        for cat in stats_json.get("categories", []):
+            cat_name = cat.get("displayName") or cat.get("name", "Stats")
+            labels = cat.get("labels", [])
+            rows = {}
+            for st in cat.get("statistics", []):
+                fmt_name = st.get("displayName") or st.get("name", "Format")
+                vals = st.get("stats", [])
+                rows[fmt_name] = dict(zip(labels, vals)) if labels else vals
+            if rows:
+                formatted_stats[cat_name] = rows
 
         return jsonify({
-            "player": name,
-            "profile_url": profile_link,
-            "career_stats": stats_tables
+            "name": full_name,
+            "player": full_name,
+            "team": team_name,
+            "country": team_name,
+            "role": position,
+            "age": age,
+            "dob": dob,
+            "batting_style": bat_style,
+            "bowling_style": bowl_style,
+            "image": image_url,
+            "stats": formatted_stats,
+            "career_stats": formatted_stats
         })
     except Exception as e:
-        return jsonify({"error": f"Failed to parse player stats: {str(e)}"}), 500
+        return jsonify({"error": f"Failed to fetch player data: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
