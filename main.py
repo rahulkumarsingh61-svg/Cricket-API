@@ -168,7 +168,7 @@ def get_live():
     try:
         url = "https://www.cricbuzz.com/cricket-match/live-scores"
         resp = requests.get(url, headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
 
         matches = []
         match_blocks = soup.find_all("div", class_=re.compile(r"cb-mtch-lst|cb-schdl"))
@@ -201,7 +201,7 @@ def get_schedule():
     try:
         url = "https://www.cricbuzz.com/cricket-schedule/upcoming-series/international"
         resp = requests.get(url, headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
 
         fixtures = []
         rows = soup.find_all("div", class_=re.compile(r"cb-ovr-flo|cb-col-100"))
@@ -241,7 +241,7 @@ def get_player(player_name):
 
     try:
         resp = requests.get(profile_link, headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(resp.text, "html.parser")
 
         name_el = soup.find("h1")
         name = name_el.get_text(strip=True) if name_el else player_name
