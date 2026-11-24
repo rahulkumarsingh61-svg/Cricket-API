@@ -158,7 +158,6 @@ def generate_key():
     })
 
 
-# 3. Live Cricket Scores Endpoint (Returns strings expected by index.html UI)
 @app.route("/live", methods=["GET"])
 @require_api_key
 def get_live():
@@ -204,7 +203,6 @@ def get_live():
     return jsonify(matches[:25])
 
 
-# 4. Upcoming Schedule Endpoint (Returns strings expected by index.html UI)
 @app.route("/schedule", methods=["GET"])
 @require_api_key
 def get_schedule():
@@ -222,24 +220,22 @@ def get_schedule():
                     status_detail = ev.get("status", {}).get("type", {}).get("detail", "")
                     comp = (ev.get("competitions") or [{}])[0]
                     venue = comp.get("venue", {}).get("fullName", "")
-                    line = f"{name} — {league_name}"
-                    if status_detail:
-                        line += f" ({status_detail})"
-                    if venue:
-                        line += f" @ {venue}"
-                    if name and line not in seen:
-                        seen.add(line)
-                        fixtures.append(line)
+                    if name and name not in seen:
+                        seen.add(name)
+                        fixtures.append({
+                            "match": name,
+                            "title": name,
+                            "series": league_name,
+                            "date": status_detail or "Scheduled",
+                            "venue": venue or "TBA",
+                            "details": f"{league_name} • {status_detail}" + (f" @ {venue}" if venue else "")
+                        })
     except Exception:
         pass
-
-    if not fixtures:
-        fixtures = ["Check back soon for upcoming international & domestic fixtures."]
 
     return jsonify(fixtures[:25])
 
 
-# 5. Player Search & Comparison Endpoint (Matches stats.batting & stats.bowling schema)
 @app.route("/players/<player_name>", methods=["GET"])
 @require_api_key
 def get_player(player_name):
@@ -306,11 +302,10 @@ def get_player(player_name):
             elif "bat" in cat_key or not batting_stats:
                 batting_stats = rows
 
-        # Guarantee non-empty batting/bowling dictionaries so frontend never crashes
         if not batting_stats:
-            batting_stats = {"Career": {"Matches": "N/A", "Runs": "N/A", "Average": "N/A", "Strike Rate": "N/A"}}
+            batting_stats = {"Test": {"Matches": "N/A", "Runs": "N/A"}, "ODI": {"Matches": "N/A", "Runs": "N/A"}, "T20I": {"Matches": "N/A", "Runs": "N/A"}}
         if not bowling_stats:
-            bowling_stats = {"Career": {"Matches": "N/A", "Wickets": "N/A", "Economy": "N/A", "Average": "N/A"}}
+            bowling_stats = {"Test": {"Matches": "N/A", "Wickets": "N/A"}, "ODI": {"Matches": "N/A", "Wickets": "N/A"}, "T20I": {"Matches": "N/A", "Wickets": "N/A"}}
 
         return jsonify({
             "name": full_name,
@@ -321,7 +316,13 @@ def get_player(player_name):
             "batting_style": bat_style,
             "bowling_style": bowl_style,
             "image": image_url,
+            "batting": batting_stats,
+            "bowling": bowling_stats,
             "stats": {
+                "batting": batting_stats,
+                "bowling": bowling_stats
+            },
+            "career_stats": {
                 "batting": batting_stats,
                 "bowling": bowling_stats
             }
